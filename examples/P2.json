@@ -1,0 +1,8 @@
+{
+  "receipt_id": "P2",
+  "device": "D",
+  "run_id": "R",
+  "page_number": 2,
+  "book": {"name": "charge", "revision": "r2"},
+  "codes": [3]
+}
