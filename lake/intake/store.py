@@ -2,7 +2,7 @@ from pathlib import Path
 
 from lake._storage import CommitProbe, local_transaction, open_connection
 from lake.intake.pages import initialize_raw_pages
-from lake.intake.receipts import initialize_receipts
+from lake.intake.receipts import initialize_receipts, migrate_receipts_schema
 
 
 class IntakeStore:
@@ -10,6 +10,7 @@ class IntakeStore:
         self.path = Path(path)
 
     def initialize(self) -> None:
+        migrate_receipts_schema(self.path)
         with self.transaction() as connection:
             initialize_receipts(connection)
             initialize_raw_pages(connection)

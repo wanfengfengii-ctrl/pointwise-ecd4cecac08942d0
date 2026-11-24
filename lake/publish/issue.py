@@ -9,6 +9,7 @@ from lake.process.complete import complete_page, find_processed_page, record_pro
 from lake.process.staging import stage_page
 from lake.publish.completeness import MissingMaterial, assess_completeness
 from lake.publish.ledger import IssuedReport, find_report, record_report
+from lake.publish.retest import applied_winners
 from lake.publish.storage import LakeStore
 from lake.publish.totals import calculate_totals
 
@@ -22,6 +23,9 @@ class PendingSettlement:
 
 def _prepare_settlement(connection: sqlite3.Connection, intake: IntakeStore, report_id: str,
                         scope: SettlementScope) -> IssuedReport | PendingSettlement:
+    # Read inside the warehouse write transaction: an applied verdict and a
+    # committed report can never then disagree about which page wins a slot.
+    winners = applied_winners(connection)
     processed = {}
     for slot in expected_page_slots(scope):
         page = find_processed_page(connection, *slot)
@@ -30,7 +34,7 @@ def _prepare_settlement(connection: sqlite3.Connection, intake: IntakeStore, rep
     remaining = (slot for slot in expected_page_slots(scope) if slot not in processed)
     waiting = {}
     new_pages = []
-    for slot, raw in pending_pages(intake, remaining).items():
+    for slot, raw in pending_pages(intake, remaining, winners).items():
         staged = stage_page(connection, raw)
         if staged is None:
             waiting[slot] = raw

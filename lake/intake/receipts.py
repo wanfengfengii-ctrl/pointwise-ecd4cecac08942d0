@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 import sqlite3
 
 from lake.intake.pages import RawPage, page_fingerprint
@@ -22,6 +23,7 @@ class Receipt:
 class ReceiptRecord:
     receipt: Receipt
     archived_report: str | None
+    replaces: str | None = None
 
 
 def initialize_receipts(connection: sqlite3.Connection) -> None:
@@ -33,9 +35,74 @@ def initialize_receipts(connection: sqlite3.Connection) -> None:
             page_number TEXT NOT NULL,
             fingerprint TEXT NOT NULL,
             archived_report TEXT,
-            UNIQUE (run_id, page_number)
+            replaces TEXT
         )
     ''')
+    # Exactly one ordinary original page per run/page slot.
+    connection.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS receipts_ordinary_slot
+        ON receipts(run_id, page_number) WHERE replaces IS NULL
+    ''')
+    # At most one retest candidate bound to each original receipt.
+    connection.execute('''
+        CREATE UNIQUE INDEX IF NOT EXISTS receipts_single_candidate
+        ON receipts(replaces) WHERE replaces IS NOT NULL
+    ''')
+
+
+def migrate_receipts_schema(path: Path) -> None:
+    """Rebuild a pre-retest receipts table so a slot may hold P and one Q."""
+    path = Path(path)
+    if not path.exists():
+        return
+    connection = sqlite3.connect(str(path), timeout=10)
+    try:
+        connection.isolation_level = None
+        columns = [row[1] for row in connection.execute('PRAGMA table_info(receipts)')]
+        if not columns or 'replaces' in columns:
+            return
+        # The old table has a table-level UNIQUE(run_id, page_number) that no
+        # index edit can relax; rebuild it with the binding column. FK enforcement
+        # must be off while the parent receipts table is dropped and renamed.
+        connection.execute('PRAGMA foreign_keys=OFF')
+        connection.execute('BEGIN IMMEDIATE')
+        # Re-check under the write lock: another initializer may have migrated.
+        columns = [row[1] for row in connection.execute('PRAGMA table_info(receipts)')]
+        if 'replaces' in columns:
+            connection.rollback()
+            return
+        connection.execute('''
+            CREATE TABLE receipts_retest (
+                receipt_id TEXT PRIMARY KEY,
+                device TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                page_number TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                archived_report TEXT,
+                replaces TEXT
+            )
+        ''')
+        connection.execute('''
+            INSERT INTO receipts_retest
+                (receipt_id, device, run_id, page_number, fingerprint,
+                 archived_report, replaces)
+            SELECT receipt_id, device, run_id, page_number, fingerprint,
+                   archived_report, NULL
+            FROM receipts
+        ''')
+        connection.execute('DROP TABLE receipts')
+        connection.execute('ALTER TABLE receipts_retest RENAME TO receipts')
+        violations = connection.execute('PRAGMA foreign_key_check').fetchall()
+        if violations:
+            raise sqlite3.IntegrityError(
+                f'foreign key violations after receipts migration: {violations!r}')
+        connection.commit()
+    except BaseException:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def _record_from_row(row) -> ReceiptRecord | None:
@@ -43,7 +110,11 @@ def _record_from_row(row) -> ReceiptRecord | None:
         return None
     receipt = Receipt(row['receipt_id'], row['device'], row['run_id'],
                       int(row['page_number'], 16), row['fingerprint'])
-    return ReceiptRecord(receipt, row['archived_report'])
+    try:
+        replaces = row['replaces']
+    except (IndexError, KeyError):
+        replaces = None
+    return ReceiptRecord(receipt, row['archived_report'], replaces)
 
 
 def find_receipt(connection: sqlite3.Connection, receipt_id: str) -> ReceiptRecord | None:
@@ -53,19 +124,32 @@ def find_receipt(connection: sqlite3.Connection, receipt_id: str) -> ReceiptReco
 
 def find_page_receipt(connection: sqlite3.Connection, run_id: str,
                       page_number: int) -> ReceiptRecord | None:
+    # The slot lookup names the ordinary original; candidates share the slot
+    # and are reached through their binding or a retest verdict.
+    row = connection.execute('''
+        SELECT * FROM receipts
+        WHERE run_id = ? AND page_number = ? AND replaces IS NULL
+    ''', (run_id, hex(page_number))).fetchone()
+    return _record_from_row(row)
+
+
+def find_candidate_for_original(connection: sqlite3.Connection,
+                                original_id: str) -> ReceiptRecord | None:
     row = connection.execute(
-        'SELECT * FROM receipts WHERE run_id = ? AND page_number = ?',
-        (run_id, hex(page_number)),
+        'SELECT * FROM receipts WHERE replaces = ?', (original_id,),
     ).fetchone()
     return _record_from_row(row)
 
 
-def record_receipt(connection: sqlite3.Connection, page: RawPage) -> Receipt:
+def record_receipt(connection: sqlite3.Connection, page: RawPage,
+                   replaces: str | None = None) -> Receipt:
     fingerprint = page_fingerprint(page)
     connection.execute('''
-        INSERT INTO receipts (receipt_id, device, run_id, page_number, fingerprint)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (page.receipt_id, page.device, page.run_id, hex(page.page_number), fingerprint))
+        INSERT INTO receipts (receipt_id, device, run_id, page_number, fingerprint,
+                              archived_report, replaces)
+        VALUES (?, ?, ?, ?, ?, NULL, ?)
+    ''', (page.receipt_id, page.device, page.run_id, hex(page.page_number),
+          fingerprint, replaces))
     return Receipt(page.receipt_id, page.device, page.run_id, page.page_number, fingerprint)
 
 

@@ -21,9 +21,12 @@ def _read_source_page(path: Path) -> RawPage:
                    BookRef(book['name'], book['revision']), data['codes'])
 
 
-def deliver_source_page(path, receive, *, commit_probe=None) -> Receipt:
+def deliver_source_page(path, receive, *, replaces=None, commit_probe=None) -> Receipt:
     page = _read_source_page(Path(path))
-    receipt = receive(page, commit_probe=commit_probe)
+    if replaces is None:
+        receipt = receive(page, commit_probe=commit_probe)
+    else:
+        receipt = receive(page, replaces=replaces, commit_probe=commit_probe)
     if not isinstance(receipt, Receipt) or not receipt.matches(page):
         raise ValueError('delivery did not return a matching receipt')
     return receipt

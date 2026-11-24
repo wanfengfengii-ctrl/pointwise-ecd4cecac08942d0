@@ -5,6 +5,7 @@ from lake.catalog.revisions import initialize_revisions
 from lake.catalog.runs import initialize_runs
 from lake.process.complete import initialize_processed
 from lake.publish.ledger import initialize_ledger
+from lake.publish.retest import initialize_retest_verdicts
 
 
 class LakeStore:
@@ -17,6 +18,7 @@ class LakeStore:
             initialize_revisions(connection)
             initialize_processed(connection)
             initialize_ledger(connection)
+            initialize_retest_verdicts(connection)
 
     def connection(self):
         return open_connection(self.path)

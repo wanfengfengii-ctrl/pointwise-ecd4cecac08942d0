@@ -10,6 +10,7 @@ from lake.intake.pages import RawPage as RawPage
 from lake.intake.store import IntakeStore
 from lake.publish.issue import PendingSettlement as PendingSettlement, finish_handoffs, settle
 from lake.publish.ledger import find_committed_page
+from lake.publish.retest import apply_retest as decide_retest
 from lake.publish.storage import LakeStore
 
 
@@ -33,23 +34,28 @@ class MeasurementLake:
         with self.warehouse.transaction() as connection:
             return publish_book(connection, name, revision, mapping)
 
-    def receive_page(self, page, *, commit_probe=None):
+    def receive_page(self, page, *, replaces=None, commit_probe=None):
         if not isinstance(page, RawPage):
             raise ValueError('expected a RawPage')
         with self.warehouse.connection() as connection:
             run = get_run(connection, page.run_id)
         return receive_page(self.intake, run, page, self._archived_source,
-                            commit_probe=commit_probe)
+                            replaces=replaces, commit_probe=commit_probe)
 
     def _archived_source(self, report_id, receipt_id):
         with self.warehouse.connection() as connection:
             source = find_committed_page(connection, report_id, receipt_id)
         return None if source is None else source.as_raw_page()
 
-    def deliver_source_page(self, path, *, commit_probe=None):
-        return deliver_source_page(path, self.receive_page, commit_probe=commit_probe)
+    def deliver_source_page(self, path, *, replaces=None, commit_probe=None):
+        return deliver_source_page(path, self.receive_page, replaces=replaces,
+                                   commit_probe=commit_probe)
 
     clear_source_page = staticmethod(clear_source_page)
+
+    def apply_retest(self, receipt_id, *, commit_probe=None):
+        return decide_retest(self.intake, self.warehouse, receipt_id,
+                             commit_probe=commit_probe)
 
     def settle(self, report_id, kind, identifier, *, commit_probe=None):
         return settle(self.intake, self.warehouse, report_id, kind, identifier,

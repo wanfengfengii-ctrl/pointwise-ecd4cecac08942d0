@@ -1,17 +1,25 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from lake.intake.pages import RawPage, load_raw_page
 from lake.intake.receipts import find_page_receipt, find_receipt, mark_archived
 from lake.intake.store import IntakeStore
 
 
-def pending_pages(store: IntakeStore, slots: Iterable[tuple[str, int]]) -> dict[tuple[str, int], RawPage]:
+def pending_pages(store: IntakeStore, slots: Iterable[tuple[str, int]],
+                  winners: Mapping[tuple[str, int], str] | None = None
+                  ) -> dict[tuple[str, int], RawPage]:
+    winners = winners or {}
     pages = {}
     with store.connection() as connection:
         # Read receipts and their payloads from the same intake snapshot.
         connection.execute('BEGIN')
         for run_id, page_number in slots:
-            record = find_page_receipt(connection, run_id, page_number)
+            candidate_id = winners.get((run_id, page_number))
+            if candidate_id is not None:
+                record = find_receipt(connection, candidate_id)
+            else:
+                # Before a retest is granted the slot is settled from P.
+                record = find_page_receipt(connection, run_id, page_number)
             if record is None or record.archived_report is not None:
                 continue
             receipt = record.receipt
